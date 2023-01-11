@@ -1,0 +1,621 @@
+---
+title: "final_report_trevor"
+author: "Trevor Kwan"
+date: "08/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+#### Background
+
+Identifying the factors that influence people's income is crucial for a fair society. The "Adult Data Set"[5] is a dataset that records people's income and related variables in the US. It was collected by Barry Becker from the 1994 Census database. It allows us to predict whether income exceeds $50K/year based on adult census data. With this dataset, we explore how the recorded variables influence people's income.
+
+
+#### Related Works
+
+The UCI adult data was first cited by [1]. This work mainly focuses on the machine learning methodologies, it compares the prediction accuracy of several basic machine learning models. The prediction accuracy of the adult dataset reported in [1] is around 85%. [2] is a more recent work that also focuses on the prediction task. It proposes a gradient boosting approach which brings the accuracy to 88%. The dataset is also very popular in the machine learning fairness literature. [3] compares it's proposed model and some baseline methods in terms of prediction accuracy and discrimination scores. [4] extends this dataset into a more suitable dataset for fair machine learning.
+
+#### Our Research Objectives
+
+In this project, by utilizing the learned generalized linear models (GLM), we want to mainly focus on the following two tasks:
+
+- Build a GLM prediction model which will perform well in the dataset;
+- Identify some key variables (or variable combinations) which have a large influence on one's income.
+
+While most related works have focused on prediction, the main focus of our analysis will be to make inferences on key variables that influence one's income.
+
+## Methods and Results
+
+#### Data Description
+
+There are 15 variables in the dataset, the response variable is a binary variable that indicates whether one's annual income exceeds 50,000 or not. Other variables include demographical information (gender, race, age, education, marital status, relationship, native country), job type (occupation, work class, working hours per week), and capital information (capital gain, capital loss). There is another variable called 'fnlwgt', which indicates how many people this sample represents in the US.
+
+There were 30162 complete observations amidst total 32561 observations. Missing data only exists in the variables `occupation`, and `native_country`. Since all of the missing variables are categorical, we converted the NA's to "Unknown" and treated the missing data simply as another category.
+
+Although income is a continuous variable by nature, it is better to dichotomize income into two levels because our analysis is specifically interested in whether an adult's income is above or below 50K per year. By treating income as a binary variable, we also avoid extremely high outlier values.
+
+#### Data Preprocessing
+
+```{r}
+## LOAD DATA
+rm(list = ls())
+suppressMessages(library(GGally))
+suppressMessages(library(tidyverse))
+suppressMessages(library(glmnet))
+library(gtsummary)
+suppressMessages(library(psych))
+library(broom)
+suppressMessages(library(pROC))
+suppressMessages(library(gridExtra))
+library(knitr)
+suppressMessages(library(Xmisc))
+suppressMessages(library(caret))
+suppressMessages(library(tm))
+suppressMessages(library(SnowballC))
+suppressMessages(library(wordcloud))
+suppressMessages(library(RColorBrewer))
+
+name_list = c('age',
+             'workclass',
+             'fnlwgt',
+             'education',
+             'education_num',
+             'marital_status',
+             'occupation',
+             'relationship',
+             'race',
+             'gender',
+             'capital_gain',
+             'capital_loss',
+             'hours_per_week',
+             'native_country',
+             'income')
+
+adult_data = read.csv('data/adult.data', header = F)
+adult_test = read.csv('data/adult.test',skip = 1, header = F)
+
+names(adult_data) = name_list
+names(adult_test) = name_list
+
+
+adult_data[is.na(adult_data)] <- "Unknown"
+adult_test[is.na(adult_test)]<- "Unknown"
+
+
+
+adult_data$marital_status[adult_data$marital_status %in% c(' Married-civ-spouse',
+                                                           ' Married-spouse-absent', 
+                                                           ' Married-AF-spouse') ] = 'Married'
+
+adult_test$marital_status[adult_test$marital_status %in% c(' Married-civ-spouse',
+                                                           ' Married-spouse-absent', 
+                                                           ' Married-AF-spouse') ] = 'Married'
+adult_data = adult_data %>% 
+    mutate(marital_status = factor(marital_status, levels = c('Married', ' Never-married', 
+                                   ' Divorced', ' Separated', ' Widowed')))
+adult_test = adult_test %>% 
+    mutate(marital_status = factor(marital_status, levels = c('Married', ' Never-married', 
+                                   ' Divorced', ' Separated', ' Widowed')))
+adult_data = adult_data %>% 
+    mutate(race = factor(race, levels =c(' White', ' Black', ' Asian-Pac-Islander',
+                                      ' Amer-Indian-Eskimo', ' Other')))
+adult_test = adult_test %>% 
+    mutate(race = factor(race, levels =c(' White', ' Black', ' Asian-Pac-Islander',
+                                      ' Amer-Indian-Eskimo', ' Other')))
+
+# pre-process income column
+adult_data = adult_data %>% mutate(income = replace(income, income == ' <=50K', 0),
+              income = replace(income, income == ' >50K', 1))%>%
+            mutate(income = as.integer(income))
+adult_test =  adult_test %>% mutate(income = replace(income, income == ' <=50K.', 0),
+          income = replace(income, income == ' >50K.', 1)) %>%
+       mutate(income = as.integer(income))
+
+# handle job type
+tmp = adult_data %>% 
+    group_by(workclass, occupation)%>%
+    summarise(mean = mean(income),
+             sd = sqrt(mean(income)*(1-mean(income))/n()))%>%ungroup()
+tmp$class = paste(tmp$workclass, tmp$occupation, sep = '-')
+threshold = quantile(tmp$mean, c(0.25,0.5,0.75))
+job_class = c()
+for(i in 1+rowSums(data.frame(a = tmp$mean > threshold[1],
+           b = tmp$mean > threshold[2],
+          c = tmp$mean > threshold[3])))
+    job_class = c(job_class, c('i1', 'i2', 'i3', 'i4')[i])
+tmp$job_class = job_class
+
+
+
+join_data = tmp %>% select(class,job_class)
+adult_data$class = paste(adult_data$workclass, adult_data$occupation, sep = '-')
+adult_test$class = paste(adult_test$workclass, adult_test$occupation, sep = '-')
+adult_data = left_join(adult_data,join_data,by ='class' ) %>% select(-class)
+adult_test = left_join(adult_test,join_data,by ='class' ) %>% select(-class)
+
+
+adult_test = adult_test %>% drop_na()
+
+## PREPROCESS TRAINING DATA (GDP_DATA)
+
+
+# read GDP and income data for native countrys
+gdp_data = read.csv('data/gdp_per_capita.csv', header = F)
+income_data = read.csv('data/income_per_capita.csv', header = F)
+
+gdp_data <- gdp_data[c(-1,-2),]
+colnames(gdp_data) <- gdp_data[1,]
+gdp_data <- gdp_data[-1,]
+rownames(gdp_data) <- 1:nrow(gdp_data)
+colnames(gdp_data)[1] <- "native_country"
+
+gdp_data <- gdp_data %>% 
+  select(native_country, "1994")
+
+# clean native_country names in adult_data
+adult_data$native_country <- str_trim(adult_data$native_country, side = c("left"))
+adult_data$native_country <- gsub("-", " ", adult_data$native_country)
+
+lj <- left_join(adult_data, gdp_data, by = "native_country")
+
+# find the native countries in adult_data that aren't in gdp_data
+lj_unique <- lj[is.na(lj$"1994"),]$native_country %>% unique()
+
+# replace country names in adult_data that are in gdp_data
+adult_data$native_country <- gsub("South", "South Africa", adult_data$native_country)
+adult_data$native_country <- gsub("England", "United Kingdom", adult_data$native_country)
+adult_data$native_country <- gsub("Iran", "Iran, Islamic Rep.", adult_data$native_country)
+adult_data$native_country <- gsub("Columbia", "Colombia", adult_data$native_country)
+adult_data$native_country <- gsub("Laos", "South Asia", adult_data$native_country)
+adult_data$native_country <- gsub("Taiwan", "China", adult_data$native_country)
+# adult_data <- adult_data[!adult_data$native_country == "Yugoslavia",]
+# adult_data <- adult_data[!adult_data$native_country == "Outlying US(Guam USVI etc)",]
+adult_data$native_country <- gsub("Scotland", "United Kingdom", adult_data$native_country)
+adult_data$native_country <- gsub("Trinadad&Tobago", "Caribbean small states", adult_data$native_country)
+adult_data$native_country <- gsub("Hong", "Hong Kong SAR, China", adult_data$native_country)
+adult_data$native_country <- gsub("Holand Netherlands", "Netherlands", adult_data$native_country)
+
+# left join again
+lj <- left_join(adult_data, gdp_data, by = "native_country")
+
+# rename column
+colnames(lj)[colnames(lj) == "1994"] <- "gdp_per_capita"
+
+## PREPROCESS TRAINING DATA (INCOME_DATA)
+
+# income data wrangling
+income_data <- income_data[c(-1,-2),]
+colnames(income_data) <- income_data[1,]
+income_data <- income_data[-1,]
+rownames(income_data) <- 1:nrow(income_data)
+colnames(income_data)[1] <- "native_country"
+
+income_data <- income_data %>% 
+  select(native_country, "1994")
+
+lj_2 <- left_join(lj, income_data, by = "native_country")
+
+# find the native countries in adult_data that aren't in income_data
+lj_unique_2 <- lj_2[is.na(lj_2$"1994"),]$native_country %>% unique()
+
+# rename income
+colnames(lj_2)[colnames(lj_2) == "1994"] <- "income_per_capita"
+
+## PREPROCESS TESTING DATA (GDP_DATA)
+
+adult_test <- adult_test[-1,]
+row.names(adult_test) <- 1:nrow(adult_test)
+
+# clean native_country names in adult_test
+adult_test$native_country <- str_trim(adult_test$native_country, side = c("left"))
+adult_test$native_country <- gsub("-", " ", adult_test$native_country)
+
+lj_test <- left_join(adult_test, gdp_data, by = "native_country")
+# find the native countries in adult_test that aren't in gdp_data
+lj_unique_test <- lj_test[is.na(lj_test$"1994"),]$native_country %>% unique()
+
+# replace country names in adult_test that are in gdp_data
+adult_test$native_country <- gsub("South", "South Africa", adult_test$native_country)
+adult_test$native_country <- gsub("Columbia", "Colombia", adult_test$native_country)
+adult_test$native_country <- gsub("Laos", "South Asia", adult_test$native_country)
+adult_test$native_country <- gsub("England", "United Kingdom", adult_test$native_country)
+adult_test$native_country <- gsub("Taiwan", "China", adult_test$native_country)
+adult_test$native_country <- gsub("Iran", "Iran, Islamic Rep.", adult_test$native_country)
+adult_test$native_country <- gsub("Scotland", "United Kingdom", adult_test$native_country)
+adult_test <- adult_test[!adult_test$native_country == "Yugoslavia",]
+adult_test$native_country <- gsub("Hong", "Hong Kong SAR, China", adult_test$native_country)
+adult_test$native_country <- gsub("Trinadad&Tobago", "Caribbean small states", adult_test$native_country)
+adult_test <- adult_test[!adult_test$native_country == "Outlying US(Guam USVI etc)",]
+
+# left join again
+lj_test <- left_join(adult_test, gdp_data, by = "native_country")
+
+# rename column
+colnames(lj_test)[colnames(lj_test) == "1994"] <- "gdp_per_capita"
+
+lj_2_test <- left_join(lj_test, income_data, by = "native_country")
+# find the native countries in adult_data that aren't in income_data
+lj_unique_2_test <- lj_2_test[is.na(lj_2_test$"1994"),]$native_country %>% unique()
+# rename income
+colnames(lj_2_test)[colnames(lj_2_test) == "1994"] <- "income_per_capita"
+## FINAL RENAME
+adult_data <- lj_2
+adult_test <- lj_2_test
+
+adult_data$gdp_per_capita[is.na(adult_data$gdp_per_capita)] = mean(gdp_data$`1994`, na.rm = T)
+adult_test$gdp_per_capita[is.na(adult_test$gdp_per_capita)] = mean(gdp_data$`1994`, na.rm = T)
+
+adult_data$income_per_capita[is.na(adult_data$income_per_capita)] = mean(income_data$`1994`, na.rm = T)
+adult_test$income_per_capita[is.na(adult_test$income_per_capita)] = mean(income_data$`1994`, na.rm = T)
+
+train_data = adult_data %>% select(-education, -relationship, - occupation, -workclass,-native_country)
+test_data = adult_test %>% select(-education, -relationship, - occupation, -workclass,-native_country)
+```
+Some categorical variables in our dataset have an excessive number of levels. This makes it difficult for model interpretability because we may find some categorical levels to be significantly related to income and other levels to not be significantly related. We are not interested in whether or not each categorical level is related to income, but rather interested in whether or not the categorical variable as a whole is related to income.
+
+Thus, we transformed the `native_country` variable into two continuous variables `gdp_per_capita` and `income_per_capita`. GDP and income data were extracted from the world bank website [6,7]. We used GDP and income data from 1994, which was the same year that adult data were collected. We matched country names from the adult training data with country names in the GDP and income data using string manipulation. For countries that had missing values for GDP or income, we simply imputed the mean GDP or mean income into those cells.
+
+We also transformed the `workclass` and `occupation` variables into one categorical variable `job_class` with four categorical levels. To do this, we transformed the binary response variable `income` into 0's and 1's with 0's representing <= 50K income and 1's representing > 50K income. For each unique combination of `workclass` and `occupation`, we computed the mean income, and then divided the combinations into four groups based on their mean income with i1 representing the lowest average income group and i4 representing the highest average income group. Doing this reduces the number of categorical levels to be fed into the model, which allows for better model interpretability.
+
+#### EDA
+
+```{r}
+# preprocess back
+adult_data = adult_data %>% mutate(income = replace(income, income == 0, ' <=50K'),
+              income = replace(income, income == 1, ' >50K'))
+
+adult_data[adult_data == "Unknown"] <- NA
+rows_missing <- sum(!complete.cases(adult_data))
+rows_complete <- sum(complete.cases(adult_data))
+adult_data[is.na(adult_data)] <- "Unknown"
+
+EDA_df <- data.frame(
+  Statistic = c("Number of Observations (Rows)",
+                "Number of Observations with Missing Data (Rows)", 
+                "Number of Complete Observations (Rows)",
+                "Proportion of Income >50K", 
+                "Proportion of Income <=50K"),
+  Value = c(nrow(adult_data), 
+            rows_missing, 
+            rows_complete, 
+            sum(adult_data$income == " >50K")/length(adult_data$income),
+            sum(adult_data$income == " <=50K")/length(adult_data$income))
+)
+
+EDA_df$Value <- round(EDA_df$Value, 3)
+kable(EDA_df, caption = "Descriptive Summary Statistics")
+```
+
+The summary table shows the total number of observations, the proportion of observations with greater than 50K income, and shows that we did impute the missing values.
+
+
+```{r}
+# age EDA (continuous)
+a <- ggplot(data = adult_data, aes(x = age, fill = income)) + 
+  geom_density(alpha = 0.5) +
+  labs(x = "Age", y = "Density", fill = "Income")
+# education_num EDA (continuous)
+above_50_edunum <- adult_data %>% 
+  filter(income == " >50K") %>% 
+  select(education_num)
+
+below_50_edunum <- adult_data %>% 
+  filter(income == " <=50K") %>% 
+  select(education_num)
+
+# test_edunum <- t.test(above_50_edunum, below_50_edunum)
+# test_edunum_p <- test_edunum$p.value
+
+# dat_edunum <- adult_data %>% 
+#   group_by(education_num, income) %>% 
+#   summarise(count = n()) %>% 
+#   mutate(perc = count/sum(count))
+
+# PLOT A (treat it as categorical)
+# ggplot(data = dat_edunum, aes(x = education_num, y = perc*100, fill = income)) +
+#   geom_histogram(stat = "identity") +
+#   labs(x = "Years of Education", y = "Percent", fill = "Income") +
+#   geom_text(aes(3, 95,label = paste0("t-test: p-value = ", round(test_edunum_p, 3))))
+
+# PLOT B (treat it as continuous)
+b <- ggplot(data = adult_data, aes(x = education_num, fill = income)) + 
+  geom_density(alpha = 0.5) +
+  labs(x = "Years of Education", y = "Density", fill = "Income")
+  # geom_text(aes(3, 1.5,label = paste0("t-test: p-value = ", round(test_edunum_p, 3))))
+
+
+
+# grid.arrange(a, a, b, b, a, a, a, a, b, b, b, b, ncol = 3, nrow = 4)
+# ?grid.arrange()
+
+
+# marital status EDA (categorical)
+dat_marital <- adult_data %>% 
+  group_by(marital_status, income) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count))
+
+# test_marital <- chisq.test(table(adult_data$marital_status, adult_data$income))
+# test_marital_p <- test_marital$p.value
+
+c <- ggplot(data = dat_marital, aes(x= factor(marital_status), y = perc*100, fill = factor(income))) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Marital Status", y = "Percent", fill = "Income") +
+  theme(axis.text.x = element_text(angle = 30, vjust = 0.95)) + 
+  ggtitle("Marital Status and Income")
+  # geom_text(aes(3, 95,label = paste0("chi-squared test: p-value = ", round(test_marital_p, 3))))
+
+# occupation EDA (categorical)
+dat_occupation <- adult_data %>% 
+  group_by(occupation, income) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count))
+
+# test_occupation <- chisq.test(table(adult_data$occupation, adult_data$income))
+# test_occupation_p <- test_occupation$p.value
+
+d <- ggplot(data = dat_occupation, aes(x= factor(occupation), y = perc*100, fill = factor(income))) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Occupation", y = "Percent", fill = "Income") +
+  theme(axis.text.x = element_text(angle = 30, vjust = 0.95)) + 
+  ggtitle("Occupation and Income")
+  # geom_text(aes(3, 95,label = paste0("chi-squared test: p-value = ", round(test_occupation_p, 3))))
+
+# relationship EDA (categorical)
+dat_relationship <- adult_data %>% 
+  group_by(relationship, income) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count))
+
+# test_relationship <- chisq.test(table(adult_data$relationship, adult_data$income))
+# test_relationship_p <- test_relationship$p.value
+
+e <- ggplot(data = dat_relationship, aes(x= factor(relationship), y = perc*100, fill = factor(income))) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Relationship Status", y = "Percent", fill = "Income") +
+  theme(axis.text.x = element_text(angle = 30)) + 
+  ggtitle("Relationship Status and Income")
+  # geom_text(aes(3, 95,label = paste0("chi-squared test: p-value = ", round(test_relationship_p, 3))))
+
+# race EDA (categorical)
+dat_race <- adult_data %>% 
+  group_by(race, income) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count))
+
+# test_race <- chisq.test(table(adult_data$race, adult_data$income))
+# test_race_p <- test_race$p.value
+
+f <- ggplot(data = dat_race, aes(x= factor(race), y = perc*100, fill = factor(income))) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Race", y = "Percent", fill = "Income") +
+  theme(axis.text.x = element_text(angle = 30, vjust = 0.95)) + 
+  ggtitle("Race and Income")
+  # geom_text(aes(3, 95,label = paste0("chi-squared test: p-value = ", round(test_race_p, 3))))
+
+
+# gender EDA (categorical)
+dat_gender <- adult_data %>% 
+  group_by(gender, income) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count))
+
+# test_gender <- chisq.test(table(adult_data$gender, adult_data$income))
+# test_gender_p <- test_gender$p.value
+
+g <- ggplot(data = dat_gender, aes(x= factor(gender), y = perc*100, fill = factor(income))) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Gender", y = "Percent", fill = "Income") +
+  theme(axis.text.x = element_text(angle = 30)) + 
+  ggtitle("Gender and Income")
+  # geom_text(aes(3, 95,label = paste0("chi-squared test: p-value = ", round(test_gender_p, 3))))
+
+
+# capital gain EDA (continuous)
+h <- ggplot(data = adult_data, aes(x = capital_gain, fill = income)) + 
+  geom_histogram(alpha = 0.5) +
+  labs(x = "Capital Gain", y = "Count", fill = "Income")
+
+
+# capital loss EDA (continuous)
+i <- ggplot(data = adult_data, aes(x = capital_loss, fill = income)) + 
+  geom_histogram(alpha = 0.5) +
+  labs(x = "Capital Loss", y = "Count", fill = "Income")
+
+
+# hours per week EDA (continuous)
+j <- ggplot(data = adult_data, aes(x = hours_per_week, fill = income)) + 
+  geom_density(alpha = 0.5) +
+  labs(x = "Working Hours Per Week", y = "Density", fill = "Income")
+
+
+# native country EDA (categorical)
+dat_native <- adult_data %>% 
+  group_by(native_country, income) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count))
+
+# test_native <- chisq.test(table(adult_data$native_country, adult_data$income))
+# test_native_p <- test_native$p.value
+
+k <- ggplot(data = dat_native, aes(x= factor(native_country), y = perc*100, fill = factor(income))) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Native Country", y = "Percent", fill = "Income") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.75)) +
+  ggtitle("Native Country and Income")#+
+  # geom_text(aes(10, 95,label = paste0("chi-squared test: p-value = ", round(test_native_p, 3))))
+
+# preprocess label back
+adult_data = adult_data %>% mutate(income = replace(income, income == ' <=50K', 0),
+              income = replace(income, income == ' >50K', 1))%>%
+            mutate(income = as.integer(income))
+```
+
+```{r}
+# run all EDA plots
+# EDA for continuous variables
+grid.arrange(a, b, h, i, j, ncol = 2, nrow = 3, top = "EDA PLots: Continuous Variables and Income")
+```
+
+Density plots and bar plots show the relationship between each continuous variable and income. For example, the age vs. income plot suggests that older people are more likely to have greater than 50K income per year. 
+
+```{r}
+# EDA for categorical variables
+c
+```
+Bar plot showing the relationship between marital status and income suggests that married people are more likely to have greater than 50K income.
+
+```{r}
+d
+```
+Bar plot showing the relationship between occupation and income suggests that certain occupations such as "Exec-Managerial", "Priv-house-serv", and "Tech-support" are more likely to have greater than 50K income.
+
+```{r}
+f
+```
+Bar plot showing the relationship between race and income suggest that "White" or "Asian-Pac-Islander" people are more likely to have greater than 50K income.
+
+```{r}
+g
+```
+Bar plot showing the relationship between gender and income suggests that males are more likely to have greater than 50K income.
+
+```{r}
+k
+```
+Bar plot showing the relationship between native country and income suggests that some countries are more likely to have greater than 50K income while other countries are more likely to have less than or equal to 50K income.
+
+```{r}
+options(repr.plot.width=20, repr.plot.height=20)
+tmp %>% ggplot( aes(y = reorder(class, -mean), 
+           x = mean,
+          color = job_class)) +
+  geom_point(size = 3) +
+  geom_line() +
+  geom_errorbar(aes(xmin = mean - 1.96*sd, 
+                    xmax = mean + 1.96*sd), 
+                width = .1)+
+ theme(axis.text.y = element_text(size = 20)) +
+    ylab('job type')
+
+```
+Each combination of `workclass` and `occupation` is categorized into one of four levels of `job_class`. The levels pertain to their respective mean income. Confidence intervals are also plotted for each combination.
+
+
+```{r}
+set.seed(2021)
+
+# split adult data by job_class
+job_list <- adult_data$job_class %>% unique()
+for (i in 1:length(job_list)) {
+  new_df <- adult_data %>% filter(job_class == job_list[i])
+  assign(paste0("new_df_", job_list[i]), new_df)
+
+}
+```
+
+
+```{r}
+## word cloud 1
+# get frequency of workclass
+df_work_i1 <- new_df_i1 %>%
+  group_by(workclass) %>% 
+  summarise(count = n())
+colnames(df_work_i1)[colnames(df_work_i1) == "workclass"] <- "job"
+
+# get frequency of occupation
+df_occ_i1 <- new_df_i1 %>% 
+  group_by(occupation) %>% 
+  summarise(count = n())
+colnames(df_occ_i1)[colnames(df_occ_i1) == "occupation"] <- "job"
+
+# combine dfs
+wc_df_i1 <- rbind(df_work_i1, df_occ_i1)
+
+wordcloud(words = wc_df_i1$job, freq = wc_df_i1$count, scale = c(3, 1), min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+```
+This word cloud represents the frequency of `workclass` levels and frequency of `occupation` levels found in `job_class` i1, the lowest average income group. The larger the size of the word, the more people belong to that level in the i1 job class. This plot suggests that people of "private" workclass or "handlers-cleaners" occupation have low income.
+
+
+```{r}
+## word cloud 2
+# get frequency of workclass
+df_work_i2 <- new_df_i2 %>%
+  group_by(workclass) %>% 
+  summarise(count = n())
+colnames(df_work_i2)[colnames(df_work_i2) == "workclass"] <- "job"
+
+# get frequency of occupation
+df_occ_i2 <- new_df_i2 %>% 
+  group_by(occupation) %>% 
+  summarise(count = n())
+colnames(df_occ_i2)[colnames(df_occ_i2) == "occupation"] <- "job"
+
+# combine dfs
+wc_df_i2 <- rbind(df_work_i2, df_occ_i2)
+
+wordcloud(words = wc_df_i2$job, freq = wc_df_i2$count, scale = c(3, 1), min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+```
+This word cloud represents the frequency of `workclass` levels and frequency of `occupation` levels found in `job_class` i2, the second lowest income group. The larger the size of the word, the more people belong to that level in the i2 job class. This plot suggests that people of "private" workclass, "adm-clerical" occupation, or "craft-repair" occupation have middle-to-low income.
+
+
+```{r}
+## word cloud 3
+# get frequency of workclass
+df_work_i3 <- new_df_i3 %>%
+  group_by(workclass) %>% 
+  summarise(count = n())
+colnames(df_work_i3)[colnames(df_work_i3) == "workclass"] <- "job"
+
+# get frequency of occupation
+df_occ_i3 <- new_df_i3 %>% 
+  group_by(occupation) %>% 
+  summarise(count = n())
+colnames(df_occ_i3)[colnames(df_occ_i3) == "occupation"] <- "job"
+
+# combine dfs
+wc_df_i3 <- rbind(df_work_i3, df_occ_i3)
+
+wordcloud(words = wc_df_i3$job, freq = wc_df_i3$count, scale = c(2.5, 0.75), min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+```
+This word cloud represents the frequency of `workclass` levels and frequency of `occupation` levels found in `job_class` i3, the second highest income group. The larger the size of the word, the more people belong to that level in the i3 job class. This plot suggests that people of "self-emp-not-inc" workclass, "tech-support" occupation, "local-gov" occupation, or "prof-specialty" occupation have middle-to-high income.
+
+
+```{r}
+## word cloud 4
+# get frequency of workclass
+df_work_i4 <- new_df_i4 %>%
+  group_by(workclass) %>% 
+  summarise(count = n())
+colnames(df_work_i4)[colnames(df_work_i4) == "workclass"] <- "job"
+
+# get frequency of occupation
+df_occ_i4 <- new_df_i4 %>% 
+  group_by(occupation) %>% 
+  summarise(count = n())
+colnames(df_occ_i4)[colnames(df_occ_i4) == "occupation"] <- "job"
+
+# combine dfs
+wc_df_i4 <- rbind(df_work_i4, df_occ_i4)
+
+wordcloud(words = wc_df_i4$job, freq = wc_df_i4$count, scale = c(3, 1), min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+
+```
+This word cloud represents the frequency of `workclass` levels and frequency of `occupation` levels found in `job_class` i4, the highest income group. The larger the size of the word, the more people belong to that level in the i4 job class. This plot suggests that people of "private" workclass, "prof-specialty" occupation, or "exec-managerial" occupation have high income.
+
+## Citations
+
+
