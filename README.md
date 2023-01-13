@@ -1,4 +1,4 @@
-# STAT 538A Final Project Generalized Linear Modeling
+# Generalized Linear Modeling Project (STAT 538A)
 
 **Investigating factors that influence the income of the citizens in US**
 
