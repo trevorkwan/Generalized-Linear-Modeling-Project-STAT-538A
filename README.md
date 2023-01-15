@@ -15,8 +15,8 @@ The UCI adult data was first cited by [1]. This work mainly focuses on the machi
 
 ###  Our reseach objectives
 
-In this project, by utilizing the learned generalized linear models (GLM), we want to mainly focus on the following two tasks:
-* Build a GLM prediction model which will perform well in the dataset;
-* Identify some key variables (or variable combinations) which have a large influence on one's income.
+In this project, by utilizing generalized linear models (GLM), we want to mainly focus on the following two tasks:
+* Build a GLM prediction model to predict adult income.
+* Identify key variables that have a large influence over one's income.
 
 See the full report [here](https://github.com/trevorkwan/Generalized-Linear-Modeling-Project-STAT-538A/blob/main/final_report.ipynb).
